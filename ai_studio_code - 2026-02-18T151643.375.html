@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmeTV Clone - Serverless</title>
+    <!-- Trystero Library for P2P Networking -->
+    <script src="https://unpkg.com/trystero@0.20.0/dist/trystero-nostr.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-bg: rgba(0, 0, 0, 0.7);
+            --accent: #0084ff;
+            --text: #ffffff;
+        }
+
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background-color: var(--bg-color);
+            color: var(--text);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+
+        /* The Split Screen Layout */
+        #app-container {
+            display: flex;
+            width: 100vw;
+            height: 100vh;
+            flex-direction: row;
+        }
+
+        .video-section {
+            position: relative;
+            flex: 1;
+            background: #000;
+            border-right: 1px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* This makes it look like OmeTV */
+            transform: scaleX(-1); /* Mirror local video */
+        }
+        
+        #remote-video {
+            transform: scaleX(1); /* Don't mirror the stranger */
+        }
+
+        .label {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: var(--panel-bg);
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 10;
+        }
+
+        /* UI Overlays */
+        #chat-overlay {
+            position: absolute;
+            bottom: 100px;
+            left: 20px;
+            width: 300px;
+            height: 250px;
+            display: flex;
+            flex-direction: column;
+            z-index: 20;
+            pointer-events: none;
+        }
+
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 10px;
+            mask-image: linear-gradient(transparent, black 20%);
+        }
+
+        .msg {
+            background: var(--panel-bg);
+            padding: 8px 12px;
+            border-radius: 15px;
+            font-size: 14px;
+            max-width: 80%;
+            pointer-events: auto;
+        }
+
+        .msg.stranger { border-left: 4px solid var(--accent); }
+        .msg.you { border-left: 4px solid #4caf50; align-self: flex-start; }
+
+        /* Controls Bottom Bar */
+        #controls {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            height: 80px;
+            background: linear-gradient(transparent, rgba(0,0,0,0.8));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            z-index: 30;
+        }
+
+        input[type="text"] {
+            width: 40%;
+            padding: 12px 20px;
+            border-radius: 25px;
+            border: none;
+            outline: none;
+            background: rgba(255,255,255,0.2);
+            color: white;
+            backdrop-filter: blur(10px);
+        }
+
+        button {
+            padding: 12px 25px;
+            border-radius: 25px;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+            transition: 0.3s;
+        }
+
+        #btn-next { background: #ff3b30; color: white; }
+        #btn-next:hover { background: #ff5e57; }
+        
+        #btn-send { background: var(--accent); color: white; }
+
+        /* Loading Spinner */
+        #waiting-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+
+        .spinner {
+            width: 50px; height: 50px;
+            border: 5px solid #333;
+            border-top: 5px solid var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        @media (max-width: 768px) {
+            #app-container { flex-direction: column; }
+            #chat-overlay { width: 90%; height: 150px; }
+            input[type="text"] { width: 50%; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="waiting-overlay">
+    <div class="spinner"></div>
+    <p id="status-text">Allow Camera Access to Begin</p>
+    <button id="btn-start" style="display:none; background: var(--accent); color:white; margin-top:10px;">START</button>
+</div>
+
+<div id="app-container">
+    <!-- Local User -->
+    <div class="video-section">
+        <div class="label">You</div>
+        <video id="local-video" autoplay muted playsinline></video>
+    </div>
+
+    <!-- Stranger -->
+    <div class="video-section">
+        <div class="label">Stranger</div>
+        <video id="remote-video" autoplay playsinline></video>
+        
+        <div id="chat-overlay">
+            <div id="messages"></div>
+        </div>
+    </div>
+</div>
+
+<div id="controls">
+    <button id="btn-next">STOP / NEXT</button>
+    <input type="text" id="chat-input" placeholder="Type a message..." disabled>
+    <button id="btn-send" disabled>Send</button>
+</div>
+
+<script>
+    const config = {appId: 'ometv-clone-p2p'};
+    let room, localStream, currentStrangerId = null;
+
+    const localVideo = document.getElementById('local-video');
+    const remoteVideo = document.getElementById('remote-video');
+    const chatInput = document.getElementById('chat-input');
+    const btnSend = document.getElementById('btn-send');
+    const btnNext = document.getElementById('btn-next');
+    const btnStart = document.getElementById('btn-start');
+    const messagesDiv = document.getElementById('messages');
+    const waitingOverlay = document.getElementById('waiting-overlay');
+    const statusText = document.getElementById('status-text');
+
+    // 1. Setup Media
+    async function init() {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({video: true, audio: true});
+            localVideo.srcObject = localStream;
+            statusText.textContent = "Ready to connect";
+            btnStart.style.display = "block";
+        } catch (e) {
+            statusText.textContent = "Camera access denied. Please refresh.";
+        }
+    }
+
+    btnStart.onclick = () => {
+        waitingOverlay.style.display = "none";
+        startSearching();
+    };
+
+    // 2. Networking Logic
+    function startSearching() {
+        if (room) {
+            // Re-matching simply refreshes the page in this P2P single-file demo
+            location.reload();
+            return;
+        }
+
+        // Connect to a public signaling "room"
+        // In this version, the first two people to join "lobby-1" will see each other
+        room = trystero.joinRoom(config, 'global-lobby-v1');
+        
+        const [sendMessage, receiveMessage] = room.makeAction('chat');
+
+        room.onPeerJoin(peerId => {
+            if (!currentStrangerId) {
+                currentStrangerId = peerId;
+                statusText.textContent = "Connected!";
+                chatInput.disabled = false;
+                btnSend.disabled = false;
+                
+                // Send our video to the stranger
+                room.addStream(localStream, peerId);
+            }
+        });
+
+        room.onPeerLeave(peerId => {
+            if (peerId === currentStrangerId) {
+                addMessage('Stranger has disconnected.', 'system');
+                setTimeout(() => location.reload(), 2000);
+            }
+        });
+
+        room.onStream((stream, peerId) => {
+            if (peerId === currentStrangerId) {
+                remoteVideo.srcObject = stream;
+            }
+        });
+
+        receiveMessage((data, peerId) => {
+            if (peerId === currentStrangerId) {
+                addMessage(data, 'stranger');
+            }
+        });
+
+        // UI Handlers
+        btnSend.onclick = () => {
+            const val = chatInput.value.trim();
+            if (val && currentStrangerId) {
+                sendMessage(val, currentStrangerId);
+                addMessage(val, 'you');
+                chatInput.value = '';
+            }
+        };
+
+        chatInput.onkeypress = (e) => { if(e.key === 'Enter') btnSend.click(); };
+    }
+
+    function addMessage(text, side) {
+        const m = document.createElement('div');
+        m.className = `msg ${side}`;
+        m.textContent = text;
+        messagesDiv.appendChild(m);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        
+        // Auto-remove messages after 10 seconds to keep screen clean like OmeTV
+        setTimeout(() => m.remove(), 10000);
+    }
+
+    btnNext.onclick = () => location.reload();
+
+    init();
+</script>
+</body>
+</html>
